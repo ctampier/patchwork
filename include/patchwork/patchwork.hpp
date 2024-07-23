@@ -95,6 +95,7 @@ struct PCAFeature {
     float    th_dist_d_;
     float    linearity_;
     float    planarity_;
+    float    surface_flatness_;
 };
 
 template<typename PointT>
@@ -188,6 +189,9 @@ public:
         ROS_INFO("\033[1;32mFlatness\033[0m thresholds: %f %f %f %f", flatness_thr_[0], flatness_thr_[1], flatness_thr_[2], flatness_thr_[3]);
 
         ROS_INFO("Num. zones: %d", num_zones_);
+
+        // Extra parameters to detect driving on grass
+        condParam(nh, "min_close_range_flat_count", min_close_range_flat_count_, num_sectors_each_zone_[0] / 4);
 
         check_input_parameters_are_correct();
 //        cout_params();
@@ -290,6 +294,9 @@ private:
     // For global threshold
     bool   using_global_thr_;
     double global_elevation_thr_;
+
+    // For driving on grass detection
+    int min_close_range_flat_count_;
 
     double          ring_size;
     double          sector_size;
@@ -404,6 +411,8 @@ void PatchWork<PointT>::estimate_plane_(const pcl::PointCloud<PointT> &ground, P
 
     feat.linearity_ = ( feat.singular_values_(0) - feat.singular_values_(1) ) / feat.singular_values_(0);
     feat.planarity_ = ( feat.singular_values_(1) - feat.singular_values_(2) ) / feat.singular_values_(0);
+    feat.surface_flatness_ = feat.singular_values_.minCoeff() /
+                                (feat.singular_values_(0) + feat.singular_values_(1) + feat.singular_values_(2));
 
     // use the least singular vector as normal
     feat.normal_ = (svd.matrixU().col(2));
@@ -593,6 +602,7 @@ void PatchWork<PointT>::estimate_ground(
     poly_list_.header.stamp = ros::Time::now();
     if (!poly_list_.polygons.empty()) poly_list_.polygons.clear();
     if (!poly_list_.likelihood.empty()) poly_list_.likelihood.clear();
+    if (!poly_list_.labels.empty()) poly_list_.labels.clear();
 
     if (initialized_ && ATAT_ON_) {
         estimate_sensor_height(cloud_in);
@@ -664,9 +674,7 @@ void PatchWork<PointT>::estimate_ground(
 
                 const double ground_z_vec       = abs(feat.normal_(2));
                 const double ground_z_elevation = feat.mean_(2);
-                const double surface_variable   =
-                                 feat.singular_values_.minCoeff() /
-                                     (feat.singular_values_(0) + feat.singular_values_(1) + feat.singular_values_(2));
+                const double surface_variable   = feat.surface_flatness_;
 
                 status = determine_ground_likelihood_estimation_status(concentric_idx, ground_z_vec,
                                                                        ground_z_elevation, surface_variable);
@@ -682,6 +690,8 @@ void PatchWork<PointT>::estimate_ground(
         }
     });
 
+    int close_range_flat_count = 0;
+
     std::for_each(indices_.begin(), indices_.end(), [&](const int &i) {
         const auto &patch_idx     = patch_indices_[i];
         const int  zone_idx       = patch_idx.zone_idx_;
@@ -695,11 +705,21 @@ void PatchWork<PointT>::estimate_ground(
         const auto &regionwise_nonground = regionwise_nongrounds_[i];
         const auto status                = statuses_[i];
 
+        if (concentric_idx == 0 && feat.surface_flatness_ < flatness_thr_[0]) {
+            close_range_flat_count++;
+        }
+
         if (visualize_ && (status != FEW_POINTS && status != NOT_ASSIGNED)) {
             auto polygons = set_polygons(zone_idx, ring_idx, sector_idx, 3);
             polygons.header = poly_list_.header;
             poly_list_.polygons.emplace_back(polygons);
             poly_list_.likelihood.emplace_back(COLOR_MAP[status]);
+            if (concentric_idx < num_rings_of_interest_) {
+                poly_list_.labels.emplace_back(feat.surface_flatness_ < flatness_thr_[concentric_idx] ? 5 : 11);
+            }
+            else {
+                poly_list_.labels.emplace_back(-1);
+            }
         }
 
         double t_tmp2 = ros::Time::now().toSec();
@@ -731,8 +751,7 @@ void PatchWork<PointT>::estimate_ground(
                           << concentric_idx
                           << "th param. flatness_thr_: " << flatness_thr_[concentric_idx]
                           << " > "
-                          << feat.singular_values_.minCoeff() /
-                                 (feat.singular_values_(0) + feat.singular_values_(1) + feat.singular_values_(2)) << "\033[0m\n";
+                          << feat.surface_flatness_ << "\033[0m\n";
                 reverted_points_by_flatness_ += regionwise_ground;
             }
             ground += regionwise_ground;
@@ -763,6 +782,12 @@ void PatchWork<PointT>::estimate_ground(
         cloud_ROS.header.stamp    = ros::Time::now();
         cloud_ROS.header.frame_id = frame_patchwork;
         RejectedCloudPub.publish(cloud_ROS);
+        if (close_range_flat_count < min_close_range_flat_count_) {
+            std::cout << "\033[1;31mLooks like we're driving on rough terrain! Number of flat patches in the first ring: "
+                      << close_range_flat_count
+                      << ". Threshold: " << min_close_range_flat_count_
+                      << "\033[0m\n";
+        }
     }
     PlanePub.publish(poly_list_);
 }
