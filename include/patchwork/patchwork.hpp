@@ -803,8 +803,10 @@ void PatchWork<PointT>::estimate_ground(
     bool rough_terrain_detected = close_range_flat_count < min_close_range_flat_count_;
     if (rough_terrain_detection_.data != rough_terrain_detected) {
         if (rough_terrain_detected) {
+            ROS_INFO("Setting rough terrain parameters");
             th_dist_ = th_dist_rough_;
         } else {
+            ROS_INFO("Setting flat terrain parameters");
             th_dist_ = th_dist_flat_;
         }
         rough_terrain_detection_.data = rough_terrain_detected;
