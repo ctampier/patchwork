@@ -5,6 +5,7 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <ros/ros.h>
 #include <jsk_recognition_msgs/PolygonArray.h>
+#include <std_msgs/Bool.h>
 #include <Eigen/Dense>
 #include <boost/format.hpp>
 #include <pcl_conversions/pcl_conversions.h>
@@ -147,6 +148,8 @@ public:
         condParam(nh, "num_min_pts", num_min_pts_, 10);
         condParam(nh, "th_seeds", th_seeds_, 0.4);
         condParam(nh, "th_dist", th_dist_, 0.3);
+        th_dist_flat_ = th_dist_;
+        condParam(nh, "th_dist_rough", th_dist_rough_, 0.3);
         condParam(nh, "max_r", max_range_, 80.0);
         condParam(nh, "min_r", min_range_, 2.7); // It indicates bodysize of the car.
         condParam(nh, "uniform/num_rings", num_rings_, 30);
@@ -210,6 +213,8 @@ public:
         PlanePub      = nh->advertise<jsk_recognition_msgs::PolygonArray>("/gpf/plane", 100);
         RevertedCloudPub = nh->advertise<sensor_msgs::PointCloud2>("/revert_pc", 100);
         RejectedCloudPub = nh->advertise<sensor_msgs::PointCloud2>("/reject_pc", 100);
+        RoughTerrainPub = nh->advertise<std_msgs::Bool>("rough_terrain_detection", 10);
+        rough_terrain_detection_.data = false;
 
         min_range_z2_ = min_ranges_[1];
         min_range_z3_ = min_ranges_[2];
@@ -280,6 +285,8 @@ private:
     double sensor_height_;
     double th_seeds_;
     double th_dist_;
+    double th_dist_flat_;
+    double th_dist_rough_;
     double max_range_;
     double min_range_;
     double uprightness_thr_;
@@ -322,8 +329,9 @@ private:
     vector<Zone> ConcentricZoneModel_;
 
     jsk_recognition_msgs::PolygonArray poly_list_;
+    std_msgs::Bool rough_terrain_detection_;
 
-    ros::Publisher          PlanePub, RevertedCloudPub, RejectedCloudPub;
+    ros::Publisher          PlanePub, RevertedCloudPub, RejectedCloudPub, RoughTerrainPub;
     pcl::PointCloud<PointT> reverted_points_by_flatness_, rejected_points_by_elevation_;
 
 
@@ -782,7 +790,7 @@ void PatchWork<PointT>::estimate_ground(
         cloud_ROS.header.stamp    = ros::Time::now();
         cloud_ROS.header.frame_id = frame_patchwork;
         RejectedCloudPub.publish(cloud_ROS);
-        if (close_range_flat_count < min_close_range_flat_count_) {
+        if (rough_terrain_detection_.data) {
             std::cout << "\033[1;31mLooks like we're driving on rough terrain! Number of flat patches in the first ring: "
                       << close_range_flat_count
                       << ". Threshold: " << min_close_range_flat_count_
@@ -790,6 +798,18 @@ void PatchWork<PointT>::estimate_ground(
         }
     }
     PlanePub.publish(poly_list_);
+
+    // Rough terrain detection
+    bool rough_terrain_detected = close_range_flat_count < min_close_range_flat_count_;
+    if (rough_terrain_detection_.data != rough_terrain_detected) {
+        if (rough_terrain_detected) {
+            th_dist_ = th_dist_rough_;
+        } else {
+            th_dist_ = th_dist_flat_;
+        }
+        rough_terrain_detection_.data = rough_terrain_detected;
+        RoughTerrainPub.publish(rough_terrain_detection_);
+    }
 }
 
 template<typename PointT>
